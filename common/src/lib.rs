@@ -134,6 +134,9 @@ where
     I: ExactSizeIterator<Item = D> + Clone,
     D: LegacyMemoryRegion,
 {
+    #[cfg(feature = "identity_map")]
+    log::info!("identity map");
+
     let config = kernel.config;
     let mut mappings = set_up_mappings(
         kernel,

@@ -42,9 +42,10 @@ bootloader-boot-config = { version = "0.11.5", path = "common/config" }
 bootloader-x86_64-bios-common = { version = "0.11.5", path = "bios/common" }
 
 [features]
-default = ["bios", "uefi"]
+default = [ "bios", "uefi" ]
 bios = ["dep:mbrman"]
 uefi = ["dep:gpt"]
+identity_map = []
 
 [dependencies]
 anyhow = "1.0.32"

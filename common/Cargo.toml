@@ -8,6 +8,9 @@ repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+identity_map = []
+
 [dependencies]
 bootloader_api = { workspace = true }
 bootloader-boot-config = { workspace = true }

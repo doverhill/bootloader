@@ -75,6 +75,8 @@ async fn build_uefi_bootloader(out_dir: &Path) -> PathBuf {
     }
     cmd.arg("--locked");
     cmd.arg("--target").arg("x86_64-unknown-uefi");
+    #[cfg(feature = "identity_map")]
+    cmd.arg("--features").arg("identity_map");
     cmd.arg("-Zbuild-std=core")
         .arg("-Zbuild-std-features=compiler-builtins-mem");
     cmd.arg("--root").arg(out_dir);
