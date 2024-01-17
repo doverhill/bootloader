@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Configures the boot behavior of the bootloader.
+// #[cfg_attr(feature = "identity_map", derive(Debug))]
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]

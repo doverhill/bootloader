@@ -1,9 +1,13 @@
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 use core::mem::MaybeUninit;
 use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
+    structures::paging::{FrameAllocator, PhysFrame, Size4KiB, PageSize},
     PhysAddr,
 };
+
+pub const IDENTITY_MAP_KERNEL_AREA_AT: u64 = 0x3FFF_0000_0000;
+pub const IDENTITY_MAP_USERSPACE_AREA_AT: u64 = 0x4000_0000_0000;
+pub const IDENTITY_MAP_KERNEL_AREA_END: u64 = 0x4000_0000_0000;
 
 /// Abstraction trait for a memory region returned by the UEFI or BIOS firmware.
 pub trait LegacyMemoryRegion: Copy + core::fmt::Debug {
@@ -23,6 +27,7 @@ pub trait LegacyMemoryRegion: Copy + core::fmt::Debug {
 }
 
 /// A physical frame allocator based on a BIOS or UEFI provided memory map.
+// #[cfg_attr(feature = "identity_map", derive(Debug))]
 pub struct LegacyFrameAllocator<I, D> {
     original: I,
     memory_map: I,
@@ -99,6 +104,55 @@ where
             .map(|r| r.start() + r.len())
             .max()
             .unwrap()
+    }
+
+    // #[cfg(feature = "identity_map")]
+    pub fn get_identity_map_parameters(&self, frame: PhysFrame<Size4KiB>) -> (bool, bool) {
+        if let Some(descriptor) = self.original.clone().find(|r| {
+            r.start() <= frame.start_address()
+                && (r.start() + r.len()) >= (frame.start_address() + Size4KiB::SIZE as u64)
+        }) {
+            (
+                true,
+                descriptor.kind() == MemoryRegionKind::Usable
+                    || descriptor.usable_after_bootloader_exit(),
+            )
+        } else {
+            (false, false)
+        }
+    }
+
+    // #[cfg(feature = "identity_map")]
+    pub fn debug(&self, kernel: &crate::Kernel) {
+        let mut usable = 0;
+        let mut used = 0;
+        let mut last_end = 0;
+
+        for descriptor in self.original.clone() {
+            let size = descriptor.len();
+
+            if kernel.start_address as u64 >= descriptor.start().as_u64() && (kernel.start_address as usize + kernel.len) <= (descriptor.start().as_u64() + descriptor.len()) as usize {
+                log::info!("KERNEL {} {}", kernel.start_address as u64, kernel.len / 1024);
+            }
+
+            if last_end != descriptor.start().as_u64() as usize {
+                log::info!("DIFF {}", (descriptor.start().as_u64() as usize - last_end) / 1024);
+            }
+            last_end = (descriptor.start().as_u64() + descriptor.len()) as usize;
+
+            if descriptor.kind() == MemoryRegionKind::Usable || descriptor.usable_after_bootloader_exit() {
+                log::info!("USABLE: {:?}", descriptor);
+                usable += size;
+            }
+            else {
+                log::info!("X: {:?}", descriptor);
+                used += size;
+            }
+        }
+
+        log::info!("USABLE: {} kiB", usable / 1024);
+        log::info!("USED: {} kiB", used / 1024);
+        log::info!("SUM: {} of {}", (usable + used) / 1024, 64 * 1024);
     }
 
     /// Converts this type to a boot info memory map.

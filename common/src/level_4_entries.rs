@@ -25,6 +25,13 @@ pub struct UsedLevel4Entries {
 }
 
 impl UsedLevel4Entries {
+    pub fn zero() -> Self {
+        UsedLevel4Entries {
+            entry_state: [false; 512],
+            rng: None
+        }
+    }
+
     /// Initializes a new instance.
     ///
     /// Marks the statically configured virtual address ranges from the config as used.

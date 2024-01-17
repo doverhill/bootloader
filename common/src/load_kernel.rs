@@ -1,4 +1,4 @@
-use crate::{level_4_entries::UsedLevel4Entries, PAGE_SIZE};
+use crate::{level_4_entries::UsedLevel4Entries, PAGE_SIZE, legacy_memory_region};
 use bootloader_api::info::TlsTemplate;
 use core::{cmp, iter::Step, mem::size_of, ops::Add};
 
@@ -44,6 +44,7 @@ where
         page_table: &'a mut M,
         frame_allocator: &'a mut F,
         used_entries: &mut UsedLevel4Entries,
+        load_at: Option<VirtAddr>,
     ) -> Result<Self, &'static str> {
         log::info!("Elf file loaded at {:#p}", kernel.elf.input);
         let kernel_offset = PhysAddr::new(&kernel.elf.input[0] as *const u8 as u64);
@@ -78,12 +79,18 @@ where
                 let size = max_addr - min_addr;
                 let align = load_program_headers.map(|h| h.align()).max().unwrap_or(1);
 
-                let offset = used_entries.get_free_address(size, align).as_u64();
+                let offset = if let Some(load_address) = load_at {
+                    load_address.as_u64()
+                } 
+                else {
+                    used_entries.get_free_address(size, align).as_u64()
+                };
                 VirtualAddressOffset::new(i128::from(offset) - i128::from(min_addr))
             }
             header::Type::Core => unimplemented!(),
             header::Type::ProcessorSpecific(_) => unimplemented!(),
         };
+
         log::info!(
             "virtual_address_offset: {:#x}",
             virtual_address_offset.virtual_address_offset()
@@ -722,11 +729,27 @@ pub fn load_kernel(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     used_entries: &mut UsedLevel4Entries,
 ) -> Result<(VirtAddr, VirtAddr, Option<TlsTemplate>), &'static str> {
-    let mut loader = Loader::new(kernel, page_table, frame_allocator, used_entries)?;
+    let mut loader = Loader::new(kernel, page_table, frame_allocator, used_entries, None)?;
     let tls_template = loader.load_segments()?;
 
     Ok((
         VirtAddr::new(loader.inner.virtual_address_offset.virtual_address_offset() as u64),
+        loader.entry_point(),
+        tls_template,
+    ))
+}
+
+
+
+pub fn load_kernel_fixed(
+    kernel: Kernel<'_>,
+    page_table: &mut (impl MapperAllSizes + Translate),
+    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+) -> Result<(VirtAddr, Option<TlsTemplate>), &'static str> {
+    let mut loader = Loader::new(kernel, page_table, frame_allocator, &mut UsedLevel4Entries::zero(), Some(VirtAddr::new(legacy_memory_region::IDENTITY_MAP_KERNEL_AREA_AT)))?;
+    let tls_template = loader.load_segments()?;
+
+    Ok((
         loader.entry_point(),
         tls_template,
     ))

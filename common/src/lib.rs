@@ -2,7 +2,7 @@
 #![feature(step_trait)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion};
+use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion, IDENTITY_MAP_KERNEL_AREA_END};
 use bootloader_api::{
     config::Mapping,
     info::{FrameBuffer, FrameBufferInfo, MemoryRegion, TlsTemplate},
@@ -91,6 +91,7 @@ pub struct RawFrameBufferInfo {
     pub info: FrameBufferInfo,
 }
 
+// #[cfg_attr(feature = "identity_map", derive(Debug))]
 pub struct Kernel<'a> {
     pub elf: ElfFile<'a>,
     pub config: BootloaderConfig,
@@ -123,6 +124,7 @@ impl<'a> Kernel<'a> {
 /// This function is a convenience function that first calls [`set_up_mappings`], then
 /// [`create_boot_info`], and finally [`switch_to_kernel`]. The given arguments are passed
 /// directly to these functions, so see their docs for more info.
+#[cfg(not(feature = "identity_map"))]
 pub fn load_and_switch_to_kernel<I, D>(
     kernel: Kernel,
     boot_config: BootConfig,
@@ -134,9 +136,6 @@ where
     I: ExactSizeIterator<Item = D> + Clone,
     D: LegacyMemoryRegion,
 {
-    #[cfg(feature = "identity_map")]
-    log::info!("identity map");
-
     let config = kernel.config;
     let mut mappings = set_up_mappings(
         kernel,
@@ -155,6 +154,45 @@ where
         system_info,
     );
     switch_to_kernel(page_tables, mappings, boot_info);
+}
+
+/// Loads the kernel ELF executable into memory and switches to it.
+#[cfg(feature = "identity_map")]
+pub fn load_and_switch_to_kernel<I, D>(
+    kernel: Kernel,
+    boot_config: BootConfig,
+    mut frame_allocator: LegacyFrameAllocator<I, D>,
+    mut page_tables: PageTables,
+    system_info: SystemInfo,
+) -> !
+where
+    I: ExactSizeIterator<Item = D> + Clone,
+    D: LegacyMemoryRegion,
+{
+    log::trace!("identity map mode");
+
+    frame_allocator.debug(&kernel);
+
+    let config = kernel.config;
+    let mut mappings = set_up_mappings_flat(
+        kernel,
+        &mut frame_allocator,
+        &mut page_tables,
+        &config,
+        &system_info,
+    );
+    // let boot_info = create_boot_info_flat(
+    //     &config,
+    //     &boot_config,
+    //     frame_allocator,
+    //     &mut page_tables,
+    //     &mut mappings,
+    //     system_info
+    // );
+    // switch_to_kernel(page_tables, mappings, boot_info);
+
+    log::trace!("looping");
+    loop {}
 }
 
 /// Sets up mappings for a kernel stack and the framebuffer.
@@ -410,6 +448,172 @@ where
         ramdisk_slice_phys_start,
         ramdisk_slice_start,
         ramdisk_slice_len,
+    }
+}
+
+// #[cfg(feature = "identity_map")]
+pub fn set_up_mappings_flat<I, D>(
+    kernel: Kernel,
+    frame_allocator: &mut LegacyFrameAllocator<I, D>,
+    page_tables: &mut PageTables,
+    config: &BootloaderConfig,
+    system_info: &SystemInfo,
+) -> Mappings
+where
+    I: ExactSizeIterator<Item = D> + Clone,
+    D: LegacyMemoryRegion,
+{
+    let kernel_page_table = &mut page_tables.kernel;
+
+    // let mut used_entries = UsedLevel4Entries::new(
+    //     frame_allocator.max_phys_addr(),
+    //     frame_allocator.len(),
+    //     framebuffer,
+    //     config,
+    // );
+
+    // Enable support for the no-execute bit in page tables.
+    enable_nxe_bit();
+    // Make the kernel respect the write-protection bits even when in ring 0 by default
+    enable_write_protect_bit();
+
+    // map physical memory using 4KiB pages (omitting first page and upper 384 KiB of first megabyte)
+    // marking only usable pages as WRITABLE
+    // also put a pointer to the next usable page at the start of each usable page, creating a linked list of free pages
+    let start_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(4096));
+    let max_phys = frame_allocator.max_phys_addr();
+    let end_frame = PhysFrame::<Size4KiB>::containing_address(max_phys - 1u64);
+
+    // let size = max_phys.as_u64();
+    // let alignment = Size2MiB::SIZE;
+    // let offset = mapping_addr(mapping, size, alignment, &mut used_entries)
+    //     .expect("start address for physical memory mapping must be 2MiB-page-aligned");
+
+    // let mut last_page: Option<Page> = None;
+    // let mut first_page: Option<Page> = None;
+    for frame in PhysFrame::range_inclusive(start_frame, end_frame) {
+        // check if this frame should be mapped (returns false for upper 384 KiB of first megabyte)
+        let (should_map, is_usable) = frame_allocator.get_identity_map_parameters(frame);
+        // log::info!("MAP frame={:?}, should_map={}, is_usable={}", frame, should_map, is_usable);
+        if should_map {
+            let page = Page::containing_address(VirtAddr::new(frame.start_address().as_u64()));
+            let mut flags = PageTableFlags::PRESENT;
+            // only map usable frames as writable
+            if is_usable {
+                flags |= PageTableFlags::WRITABLE;
+                // if let Some(last) = last_page {
+                //     // unsafe {
+                //     //     *(last.start_address().as_mut_ptr::<u64>()) = page.start_address().as_u64();
+                //     // }
+                // }
+                // last_page = Some(page);
+                // if first_page.is_none() {
+                //     first_page = Some(page);
+                // }
+            }
+            match unsafe { kernel_page_table.map_to(page, frame, flags, frame_allocator) } {
+                Ok(tlb) => tlb.ignore(),
+                Err(err) => panic!(
+                    "failed to map page {:?} to frame {:?}: {:?}",
+                    page, frame, err
+                ),
+            };
+        }
+    }
+
+    // map rest of physical memory using 2MB pages
+    // let start_frame = PhysFrame::containing_address(PhysAddr::new(2 * 1024 * 1024));
+    // let max_phys = frame_allocator.max_phys_addr();
+    // let end_frame: PhysFrame<Size2MiB> = PhysFrame::containing_address(max_phys - 1u64);
+
+    // let size = max_phys.as_u64();
+    // let alignment = Size2MiB::SIZE;
+    // // let offset = mapping_addr(mapping, size, alignment, &mut used_entries)
+    // //     .expect("start address for physical memory mapping must be 2MiB-page-aligned");
+
+    // for frame in PhysFrame::range_inclusive(start_frame, end_frame) {
+    //     let page = Page::containing_address(offset + frame.start_address().as_u64());
+    //     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    //     match unsafe { kernel_page_table.map_to(page, frame, flags, frame_allocator) } {
+    //         Ok(tlb) => tlb.ignore(),
+    //         Err(err) => panic!(
+    //             "failed to map page {:?} to frame {:?}: {:?}",
+    //             page, frame, err
+    //         ),
+    //     };
+    // }
+
+
+    // physical
+    // 00xxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx
+    // 0x0000_0000_0000 - 0x3fff_ffff_ffff
+
+    // kernel (virtual in physical half)
+    // 0x3FFF_0000_0000 - 0x3FFF_FFFF_FFFF
+
+    // virtual (user space)
+    // 01xxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx
+    // 0x4000_0000_0000 - 0x7fff_ffff_ffff
+
+    // let config = kernel.config;
+    // let kernel_slice_start = PhysAddr::new(kernel.start_address as _);
+    // let kernel_slice_len = u64::try_from(kernel.len).unwrap();
+
+    let (entry_point, tls_template) =
+        load_kernel::load_kernel_fixed(kernel, kernel_page_table, frame_allocator)
+            .expect("no entry point");
+    log::info!("Entry point at: {:#x}", entry_point.as_u64());
+
+    // create a stack
+    let stack_start = Page::<Size4KiB>::containing_address(VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END - config.kernel_stack_size));
+    let stack_end_addr = VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END);
+
+    let stack_end = Page::<Size4KiB>::containing_address(VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END - 1u64));
+    for page in Page::range_inclusive(stack_start, stack_end) {
+        let frame = frame_allocator
+            .allocate_frame()
+            .expect("frame allocation failed when mapping a kernel stack");
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        match unsafe { kernel_page_table.map_to(page, frame, flags, frame_allocator) } {
+            Ok(tlb) => tlb.flush(),
+            Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
+        }
+    }
+
+    // create, load, and identity-map GDT (required for working `iretq`)
+    let gdt_frame = frame_allocator
+        .allocate_frame()
+        .expect("failed to allocate GDT frame");
+    gdt::create_and_load(gdt_frame);
+    // // match unsafe {
+    // //     kernel_page_table.identity_map(gdt_frame, PageTableFlags::PRESENT, frame_allocator)
+    // // } {
+    // //     Ok(tlb) => tlb.flush(),
+    // //     Err(err) => panic!("failed to identity map frame {:?}: {:?}", gdt_frame, err),
+    // // }
+
+    let ramdisk_slice_len = system_info.ramdisk_len;
+    let ramdisk_slice_phys_start = system_info.ramdisk_addr.map(PhysAddr::new);
+
+    Mappings {
+        framebuffer: None,
+        entry_point,
+        // Use the configured stack size, even if it's not page-aligned. However, we
+        // need to align it down to the next 16-byte boundary because the System V
+        // ABI requires a 16-byte stack alignment.
+        stack_top: stack_end_addr.align_down(16u8),
+        used_entries: UsedLevel4Entries::zero(),
+        physical_memory_offset: None,
+        recursive_index: None,
+        tls_template,
+
+        kernel_slice_start: PhysAddr::zero(),
+        kernel_slice_len: 0,
+        kernel_image_offset: VirtAddr::zero(),
+
+        ramdisk_slice_phys_start: None,
+        ramdisk_slice_start: None,
+        ramdisk_slice_len: 0,
     }
 }
 
