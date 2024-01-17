@@ -2,7 +2,9 @@
 #![feature(step_trait)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion, IDENTITY_MAP_KERNEL_AREA_END};
+use crate::legacy_memory_region::{
+    LegacyFrameAllocator, LegacyMemoryRegion, IDENTITY_MAP_KERNEL_AREA_END,
+};
 use bootloader_api::{
     config::Mapping,
     info::{FrameBuffer, FrameBufferInfo, MemoryRegion, TlsTemplate},
@@ -169,8 +171,6 @@ where
     I: ExactSizeIterator<Item = D> + Clone,
     D: LegacyMemoryRegion,
 {
-    log::trace!("identity map mode");
-
     frame_allocator.debug(&kernel);
 
     let config = kernel.config;
@@ -181,18 +181,15 @@ where
         &config,
         &system_info,
     );
-    // let boot_info = create_boot_info_flat(
-    //     &config,
-    //     &boot_config,
-    //     frame_allocator,
-    //     &mut page_tables,
-    //     &mut mappings,
-    //     system_info
-    // );
-    // switch_to_kernel(page_tables, mappings, boot_info);
-
-    log::trace!("looping");
-    loop {}
+    let boot_info = create_boot_info_flat(
+        &config,
+        &boot_config,
+        frame_allocator,
+        &mut page_tables,
+        &mut mappings,
+        system_info,
+    );
+    switch_to_kernel(page_tables, mappings, boot_info);
 }
 
 /// Sets up mappings for a kernel stack and the framebuffer.
@@ -484,6 +481,12 @@ where
     let max_phys = frame_allocator.max_phys_addr();
     let end_frame = PhysFrame::<Size4KiB>::containing_address(max_phys - 1u64);
 
+    log::info!(
+        "Identity mapping physical memory: {:?} - {:?}",
+        start_frame,
+        end_frame
+    );
+
     // let size = max_phys.as_u64();
     // let alignment = Size2MiB::SIZE;
     // let offset = mapping_addr(mapping, size, alignment, &mut used_entries)
@@ -543,7 +546,6 @@ where
     //     };
     // }
 
-
     // physical
     // 00xxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx  xxxxxxxx xxxxxxxx
     // 0x0000_0000_0000 - 0x3fff_ffff_ffff
@@ -565,10 +567,13 @@ where
     log::info!("Entry point at: {:#x}", entry_point.as_u64());
 
     // create a stack
-    let stack_start = Page::<Size4KiB>::containing_address(VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END - config.kernel_stack_size));
+    let stack_start = Page::<Size4KiB>::containing_address(VirtAddr::new(
+        IDENTITY_MAP_KERNEL_AREA_END - config.kernel_stack_size,
+    ));
     let stack_end_addr = VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END);
 
-    let stack_end = Page::<Size4KiB>::containing_address(VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END - 1u64));
+    let stack_end =
+        Page::<Size4KiB>::containing_address(VirtAddr::new(IDENTITY_MAP_KERNEL_AREA_END - 1u64));
     for page in Page::range_inclusive(stack_start, stack_end) {
         let frame = frame_allocator
             .allocate_frame()
@@ -710,6 +715,133 @@ where
                 Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
             }
         }
+
+        let boot_info: &'static mut MaybeUninit<BootInfo> =
+            unsafe { &mut *boot_info_addr.as_mut_ptr() };
+        let memory_regions: &'static mut [MaybeUninit<MemoryRegion>] =
+            unsafe { slice::from_raw_parts_mut(memory_map_regions_addr.as_mut_ptr(), regions) };
+        (boot_info, memory_regions)
+    };
+
+    log::info!("Create Memory Map");
+
+    // build memory map
+    let memory_regions = frame_allocator.construct_memory_map(
+        memory_regions,
+        mappings.kernel_slice_start,
+        mappings.kernel_slice_len,
+        mappings.ramdisk_slice_phys_start,
+        mappings.ramdisk_slice_len,
+    );
+
+    log::info!("Create bootinfo");
+
+    // create boot info
+    let boot_info = boot_info.write({
+        let mut info = BootInfo::new(memory_regions.into());
+        info.framebuffer = mappings
+            .framebuffer
+            .map(|addr| unsafe {
+                FrameBuffer::new(
+                    addr.as_u64(),
+                    system_info
+                        .framebuffer
+                        .expect(
+                            "there shouldn't be a mapping for the framebuffer if there is \
+                            no framebuffer",
+                        )
+                        .info,
+                )
+            })
+            .into();
+        info.physical_memory_offset = mappings.physical_memory_offset.map(VirtAddr::as_u64).into();
+        info.recursive_index = mappings.recursive_index.map(Into::into).into();
+        info.rsdp_addr = system_info.rsdp_addr.map(|addr| addr.as_u64()).into();
+        info.tls_template = mappings.tls_template.into();
+        info.ramdisk_addr = mappings
+            .ramdisk_slice_start
+            .map(|addr| addr.as_u64())
+            .into();
+        info.ramdisk_len = mappings.ramdisk_slice_len;
+        info.kernel_addr = mappings.kernel_slice_start.as_u64();
+        info.kernel_len = mappings.kernel_slice_len as _;
+        info.kernel_image_offset = mappings.kernel_image_offset.as_u64();
+        info._test_sentinel = boot_config._test_sentinel;
+        info
+    });
+
+    boot_info
+}
+
+pub fn create_boot_info_flat<I, D>(
+    config: &BootloaderConfig,
+    boot_config: &BootConfig,
+    mut frame_allocator: LegacyFrameAllocator<I, D>,
+    page_tables: &mut PageTables,
+    mappings: &mut Mappings,
+    system_info: SystemInfo,
+) -> &'static mut BootInfo
+where
+    I: ExactSizeIterator<Item = D> + Clone,
+    D: LegacyMemoryRegion,
+{
+    log::info!("Allocate bootinfo");
+
+    // allocate and map space for the boot info
+    let (boot_info, memory_regions) = {
+        let boot_info_layout = Layout::new::<BootInfo>();
+        let regions = frame_allocator.len() + 4; // up to 4 regions might be split into used/unused
+        let memory_regions_layout = Layout::array::<MemoryRegion>(regions).unwrap();
+        let (combined, memory_regions_offset) =
+            boot_info_layout.extend(memory_regions_layout).unwrap();
+
+        log::info!("Allocating {} bytes for boot info", combined.size());
+
+        // FIXME
+        assert!(combined.size() <= 4096);
+
+        // let boot_info_addr = mapping_addr(
+        //     config.mappings.boot_info,
+        //     u64::from_usize(combined.size()),
+        //     u64::from_usize(combined.align()),
+        //     &mut mappings.used_entries,
+        // )
+        // .expect("boot info addr is not properly aligned");
+
+        // let memory_map_regions_end = boot_info_addr + combined.size();
+
+        let frame = frame_allocator
+        .allocate_frame()
+        .expect("frame allocation for boot info failed");
+
+        let boot_info_addr = VirtAddr::new(frame.start_address().as_u64());
+        let memory_map_regions_addr = boot_info_addr + memory_regions_offset;
+
+        // let start_page = Page::containing_address(boot_info_addr);
+        // let end_page = Page::containing_address(memory_map_regions_end - 1u64);
+        // for page in Page::range_inclusive(start_page, end_page) {
+        //     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        //     let frame = frame_allocator
+        //         .allocate_frame()
+        //         .expect("frame allocation for boot info failed");
+        //     match unsafe {
+        //         page_tables
+        //             .kernel
+        //             .map_to(page, frame, flags, &mut frame_allocator)
+        //     } {
+        //         Ok(tlb) => tlb.flush(),
+        //         Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
+        //     }
+        //     // we need to be able to access it too
+        //     match unsafe {
+        //         page_tables
+        //             .bootloader
+        //             .map_to(page, frame, flags, &mut frame_allocator)
+        //     } {
+        //         Ok(tlb) => tlb.flush(),
+        //         Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
+        //     }
+        // }
 
         let boot_info: &'static mut MaybeUninit<BootInfo> =
             unsafe { &mut *boot_info_addr.as_mut_ptr() };
