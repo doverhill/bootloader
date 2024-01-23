@@ -558,8 +558,8 @@ where
     // 0x4000_0000_0000 - 0x7fff_ffff_ffff
 
     // let config = kernel.config;
-    // let kernel_slice_start = PhysAddr::new(kernel.start_address as _);
-    // let kernel_slice_len = u64::try_from(kernel.len).unwrap();
+    let kernel_slice_start = PhysAddr::new(kernel.start_address as _);
+    let kernel_slice_len = u64::try_from(kernel.len).unwrap();
 
     let (entry_point, tls_template) =
         load_kernel::load_kernel_fixed(kernel, kernel_page_table, frame_allocator)
@@ -599,6 +599,7 @@ where
 
     let ramdisk_slice_len = system_info.ramdisk_len;
     let ramdisk_slice_phys_start = system_info.ramdisk_addr.map(PhysAddr::new);
+    let ramdisk_slice_start = system_info.ramdisk_addr.map(VirtAddr::new);    
 
     Mappings {
         framebuffer: None,
@@ -612,13 +613,13 @@ where
         recursive_index: None,
         tls_template,
 
-        kernel_slice_start: PhysAddr::zero(),
-        kernel_slice_len: 0,
+        kernel_slice_start,
+        kernel_slice_len,
         kernel_image_offset: VirtAddr::zero(),
 
-        ramdisk_slice_phys_start: None,
-        ramdisk_slice_start: None,
-        ramdisk_slice_len: 0,
+        ramdisk_slice_phys_start,
+        ramdisk_slice_start,
+        ramdisk_slice_len,
     }
 }
 
