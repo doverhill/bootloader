@@ -1,5 +1,20 @@
 # Unreleased
 
+# 0.11.7 – 2024-02-16
+
+* Set `NO_EXECUTE` flag for all writable memory regions by @phil-opp in https://github.com/rust-osdev/bootloader/pull/409
+* adapt data layout to match LLVM's by @tsatke in https://github.com/rust-osdev/bootloader/pull/420
+
+**Full Changelog**: https://github.com/rust-osdev/bootloader/compare/v0.11.6...v0.11.7
+
+# 0.11.6 – 2024-01-28
+
+* [Embed bios and uefi binaries](https://github.com/rust-osdev/bootloader/pull/395)
+* [Add a `take` method to `Optional`](https://github.com/rust-osdev/bootloader/pull/411)
+* [Fix data layout for stage 3 target](https://github.com/rust-osdev/bootloader/pull/413)
+
+**Full Changelog**: https://github.com/rust-osdev/bootloader/compare/v0.11.5...v0.11.6
+
 # 0.11.5 – 2023-12-28
 
 * [RacyCell<T>: Data race allowed on `T`](https://github.com/rust-osdev/bootloader/pull/390)
